@@ -3,9 +3,10 @@
 package server
 
 import (
-	"github.com/nats-io/nats-streaming-server/stores"
 	"sync"
 	"time"
+
+	"github.com/jdomzhang/nats-streaming-server/stores"
 )
 
 // This is a proxy to the store interface.

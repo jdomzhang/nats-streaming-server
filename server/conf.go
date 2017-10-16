@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jdomzhang/nats-streaming-server/stores"
+	"github.com/jdomzhang/nats-streaming-server/util"
 	"github.com/nats-io/gnatsd/conf"
 	natsd "github.com/nats-io/gnatsd/server"
-	"github.com/nats-io/nats-streaming-server/stores"
-	"github.com/nats-io/nats-streaming-server/util"
 )
 
 // ProcessConfigFile parses the configuration file `configFile` and updates
@@ -435,6 +435,8 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.IntVar(&sopts.IOBatchSize, "io_batch_size", DefaultIOBatchSize, "stan.IOBatchSize")
 	fs.Int64Var(&sopts.IOSleepTime, "io_sleep_time", DefaultIOSleepTime, "stan.IOSleepTime")
 	fs.StringVar(&sopts.FTGroupName, "ft_group", "", "stan.FTGroupName")
+	fs.BoolVar(&sopts.StickyQGroup, "sticky_qgroup", false, "stan.StickyQGroup")
+	fs.BoolVar(&sopts.StickyQGroup, "SQ", false, "stan.StickyQGroup")
 
 	// First, we need to call NATS's ConfigureOptions() with above flag set.
 	// It will be augmented with NATS specific flags and call fs.Parse(args) for us.

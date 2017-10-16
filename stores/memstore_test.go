@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/nats-io/nats-streaming-server/util"
+	"github.com/jdomzhang/nats-streaming-server/util"
 )
 
 func createDefaultMemStore(t *testing.T) *MemoryStore {

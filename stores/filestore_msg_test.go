@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/nats-io/go-nats-streaming/pb"
-	"github.com/nats-io/nats-streaming-server/util"
+	"github.com/jdomzhang/nats-streaming-server/util"
 )
 
 const (

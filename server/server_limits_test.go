@@ -8,7 +8,7 @@ import (
 
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/go-nats-streaming/pb"
-	"github.com/nats-io/nats-streaming-server/stores"
+	"github.com/jdomzhang/nats-streaming-server/stores"
 )
 
 func TestTooManyChannelsOnCreateSub(t *testing.T) {

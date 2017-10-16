@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/nats-io/nats-streaming-server/stores"
+	"github.com/jdomzhang/nats-streaming-server/stores"
 	"github.com/nats-io/nuid"
 	"time"
 )

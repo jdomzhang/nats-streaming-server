@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/nats-io/go-nats-streaming/pb"
-	"github.com/nats-io/nats-streaming-server/logger"
-	"github.com/nats-io/nats-streaming-server/spb"
+	"github.com/jdomzhang/nats-streaming-server/logger"
+	"github.com/jdomzhang/nats-streaming-server/spb"
 	"github.com/nats-io/nuid"
 )
 

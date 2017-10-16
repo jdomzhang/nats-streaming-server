@@ -109,7 +109,7 @@ If no error is reported, the server will then proceed with calling `Recover()`, 
 * `GetExclusiveLock()`: In Fault Tolerance mode, when a server is elected leader, it will attempt to get an exclusive
 lock to the shared storage before proceeding.<br>
 
-Check the [Store interface](https://github.com/nats-io/nats-streaming-server/blob/master/stores/store.go) for more information.
+Check the [Store interface](https://github.com/jdomzhang/nats-streaming-server/blob/master/stores/store.go) for more information.
 
 # Concepts
 
@@ -235,7 +235,7 @@ If a queue member leaves the group, its unacknowledged messages are redistribute
 
 ## Store Interface
 
-Every store implementation follows the [Store interface](https://github.com/nats-io/nats-streaming-server/blob/master/stores/store.go).
+Every store implementation follows the [Store interface](https://github.com/jdomzhang/nats-streaming-server/blob/master/stores/store.go).
 
 On startup, the server creates a unique instance of the `Store`. The constructor of a store implementation can do some
 initialization and configuration check, but *must not* access, or attempt to recover, the storage at this point. This is important
@@ -254,7 +254,7 @@ If you wish to contribute to a new store type, your implementation must include 
 
 The memory and the provided file store implementations both use a generic store implementation to avoid code duplication.
 When writing your own store implementation, you can do the same for APIs that don't need to do more than what the generic implementation provides.
-You can check [MemStore](https://github.com/nats-io/nats-streaming-server/blob/master/stores/memstore.go) and [FileStore](https://github.com/nats-io/nats-streaming-server/blob/master/stores/filestore.go) implementations for more details.
+You can check [MemStore](https://github.com/jdomzhang/nats-streaming-server/blob/master/stores/memstore.go) and [FileStore](https://github.com/jdomzhang/nats-streaming-server/blob/master/stores/filestore.go) implementations for more details.
 
 ## Clustering
 
@@ -1323,4 +1323,4 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 [Coverage-image]: https://coveralls.io/repos/github/nats-io/nats-streaming-server/badge.svg?branch=master&t=kIxrDE
 [ReportCard-Url]: http://goreportcard.com/report/nats-io/nats-streaming-server
 [ReportCard-Image]: http://goreportcard.com/badge/github.com/nats-io/nats-streaming-server
-[github-release]: https://github.com/nats-io/nats-streaming-server/releases/
+[github-release]: https://github.com/jdomzhang/nats-streaming-server/releases/

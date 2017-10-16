@@ -13,8 +13,8 @@ import (
 	natsdTest "github.com/nats-io/gnatsd/test"
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming"
-	"github.com/nats-io/nats-streaming-server/spb"
-	"github.com/nats-io/nats-streaming-server/stores"
+	"github.com/jdomzhang/nats-streaming-server/spb"
+	"github.com/jdomzhang/nats-streaming-server/stores"
 )
 
 func setPartitionsVarsForTest() {

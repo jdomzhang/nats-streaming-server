@@ -9,9 +9,9 @@ import (
 
 	natsd "github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/go-nats"
-	"github.com/nats-io/nats-streaming-server/spb"
-	"github.com/nats-io/nats-streaming-server/stores"
-	"github.com/nats-io/nats-streaming-server/util"
+	"github.com/jdomzhang/nats-streaming-server/spb"
+	"github.com/jdomzhang/nats-streaming-server/stores"
+	"github.com/jdomzhang/nats-streaming-server/util"
 )
 
 // Constants related to partitioning

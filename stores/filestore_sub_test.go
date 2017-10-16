@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats-streaming-server/spb"
-	"github.com/nats-io/nats-streaming-server/util"
+	"github.com/jdomzhang/nats-streaming-server/spb"
+	"github.com/jdomzhang/nats-streaming-server/util"
 )
 
 func TestFSBadSubFile(t *testing.T) {

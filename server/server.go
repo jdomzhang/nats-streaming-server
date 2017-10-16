@@ -16,15 +16,16 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"math/rand"
 
 	natsdLogger "github.com/nats-io/gnatsd/logger"
 	"github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming/pb"
-	"github.com/nats-io/nats-streaming-server/logger"
-	"github.com/nats-io/nats-streaming-server/spb"
-	"github.com/nats-io/nats-streaming-server/stores"
-	"github.com/nats-io/nats-streaming-server/util"
+	"github.com/jdomzhang/nats-streaming-server/logger"
+	"github.com/jdomzhang/nats-streaming-server/spb"
+	"github.com/jdomzhang/nats-streaming-server/stores"
+	"github.com/jdomzhang/nats-streaming-server/util"
 	"github.com/nats-io/nuid"
 )
 
@@ -417,6 +418,7 @@ type queueState struct {
 	shadow          *subState // For durable case, when last member leaves and group is not closed.
 	stalledSubCount int       // number of stalled members
 	newOnHold       bool
+	lastSubCount	int       // remind the last count, to see if there is new added sub
 }
 
 // When doing message redelivery due to ack expiration, the function
@@ -510,7 +512,7 @@ func (ss *subStore) updateState(sub *subState) {
 		// keep a reference to it until a member re-joins the group.
 		if sub.ClientID == "" {
 			// There should be only one shadow queue subscriber, but
-			// we found in https://github.com/nats-io/nats-streaming-server/issues/322
+			// we found in https://github.com/jdomzhang/nats-streaming-server/issues/322
 			// that some datastore had 2 of those (not sure how this happened except
 			// maybe due to upgrades from much older releases that had bugs?).
 			// So don't panic and use as the shadow the one with the highest LastSent
@@ -828,6 +830,7 @@ type Options struct {
 	AckSubsPoolSize    int           // Number of internal subscriptions handling incoming ACKs (0 means one per client's subscription).
 	FTGroupName        string        // Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
 	Partitioning       bool          // Specify if server only accepts messages/subscriptions on channels defined in StoreLimits.
+	StickyQGroup       bool          // Sticky sub of queue group, reassign the sub only when the total count of group members changed
 }
 
 // Clone returns a deep copy of the Options object.
@@ -1343,6 +1346,11 @@ func (s *StanServer) start(runningState State) error {
 		s.log.Noticef(l)
 	}
 
+	// Show the sticky queue group setting
+	if s.opts.StickyQGroup {
+		s.log.Noticef("Sticky Queue Group is on")
+	}
+
 	// Execute (in a go routine) redelivery of unacknowledged messages,
 	// and release newOnHold
 	s.wg.Add(1)
@@ -1573,7 +1581,7 @@ func (s *StanServer) processRecoveredChannels(channels map[string]*stores.Recove
 			// Add the subscription to the corresponding client
 			added := s.clients.addSub(sub.ClientID, sub)
 			if added || sub.IsDurable {
-				// Repair for issue https://github.com/nats-io/nats-streaming-server/issues/215
+				// Repair for issue https://github.com/jdomzhang/nats-streaming-server/issues/215
 				// Do not recover a queue durable subscriber that still
 				// has ClientID but for which connection was closed (=>!added)
 				if !added && sub.isQueueDurableSubscriber() && !sub.isShadowQueueDurable() {
@@ -2228,13 +2236,13 @@ func (s *StanServer) sendPublishErr(subj, guid string, err error) {
 
 // FIXME(dlc) - place holder to pick sub that has least outstanding, should just sort,
 // or use insertion sort, etc.
-func findBestQueueSub(sl []*subState) *subState {
+func findBestQueueSub(sl []*subState, s *StanServer) *subState {
 	var (
 		leastOutstanding = int(^uint(0) >> 1)
 		rsub             *subState
+		currentSubCount = 0
 	)
 	for _, sub := range sl {
-
 		sub.RLock()
 		sOut := len(sub.acksPending)
 		sStalled := sub.stalled
@@ -2247,17 +2255,70 @@ func findBestQueueSub(sl []*subState) *subState {
 				leastOutstanding = sOut
 				rsub = sub
 			}
+			currentSubCount ++
 		}
 	}
+	
+
+	if rsub != nil && s.opts.StickyQGroup && currentSubCount > 0 {
+		// check if repicking the sub if required
+		// only when it's sticky
+		// and the sub list count changed
+		shouldRepick := (rsub.qstate.lastSubCount != currentSubCount)
+
+		// set total count
+		qs := rsub.qstate
+		qs.lastSubCount = currentSubCount
+
+		if shouldRepick {
+			myRand := rand.New(rand.NewSource(time.Now().UnixNano()))
+			randomIndex := myRand.Intn(currentSubCount)
+			targetIndex := -1
+
+			// pick
+			for index, sub := range sl {
+				sub.RLock()
+				// sOut := len(sub.acksPending)
+				sStalled := sub.stalled
+				sHasFailedHB := sub.hasFailedHB
+				sub.RUnlock()
+
+				if !sStalled && !sHasFailedHB {
+					if randomIndex == 0 {
+						targetIndex = index
+						break
+					}
+				
+					randomIndex --
+				}
+			}
+
+			if targetIndex >= 0 {
+				rsub = sl[targetIndex]
+			}
+
+			// got the random sub, move it to first element
+			if rsub != nil {
+				sl[targetIndex] = sl[0]
+				sl[0] = rsub
+				s.log.Noticef("[%v]: lastSubCount: %v, currentSubCount: %v", rsub.subject, rsub.qstate.lastSubCount, currentSubCount)
+				s.log.Noticef("[%v]: repicked client: %v\n", rsub.subject, rsub.ClientID)
+			}
+		}
+	}
+
 
 	len := len(sl)
 	if rsub == nil && len > 0 {
 		rsub = sl[0]
 	}
-	if len > 1 && rsub == sl[0] {
-		copy(sl, sl[1:len])
-		sl[len-1] = rsub
+	if !s.opts.StickyQGroup {
+		if len > 1 && rsub == sl[0] {
+			copy(sl, sl[1:len])
+			sl[len-1] = rsub
+		}
 	}
+
 
 	return rsub
 }
@@ -2265,7 +2326,7 @@ func findBestQueueSub(sl []*subState) *subState {
 // Send a message to the queue group
 // Assumes qs lock held for write
 func (s *StanServer) sendMsgToQueueGroup(qs *queueState, m *pb.MsgProto, force bool) (*subState, bool, bool) {
-	sub := findBestQueueSub(qs.subs)
+	sub := findBestQueueSub(qs.subs, s)
 	if sub == nil {
 		return nil, false, false
 	}

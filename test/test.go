@@ -4,7 +4,7 @@ package test
 
 import (
 	gnatsd "github.com/nats-io/gnatsd/server"
-	"github.com/nats-io/nats-streaming-server/server"
+	"github.com/jdomzhang/nats-streaming-server/server"
 )
 
 // RunServer launches a server with the specified ID and default options.

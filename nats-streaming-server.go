@@ -8,8 +8,8 @@ import (
 	"os"
 	"runtime"
 
+	stand "github.com/jdomzhang/nats-streaming-server/server"
 	natsd "github.com/nats-io/gnatsd/server"
-	stand "github.com/nats-io/nats-streaming-server/server"
 )
 
 var usageStr = `
@@ -93,6 +93,9 @@ TLS Options:
 NATS Clustering Options:
         --routes <string, ...>       Routes to solicit and connect
         --cluster <string>           Cluster URL for solicited routes
+
+Sticky Queue Group Options:
+        -SQ, --sticky_qgroup=<bool>  Enable sticky queue group, reassign subscription only when members changed
 
 Common Options:
     -h, --help                       Show this message

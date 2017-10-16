@@ -14,7 +14,7 @@ import (
 	"time"
 
 	natsd "github.com/nats-io/gnatsd/server"
-	"github.com/nats-io/nats-streaming-server/stores"
+	"github.com/jdomzhang/nats-streaming-server/stores"
 )
 
 const (

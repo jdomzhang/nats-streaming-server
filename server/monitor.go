@@ -13,7 +13,7 @@ import (
 	"time"
 
 	gnatsd "github.com/nats-io/gnatsd/server"
-	"github.com/nats-io/nats-streaming-server/stores"
+	"github.com/jdomzhang/nats-streaming-server/stores"
 )
 
 // Routes for the monitoring pages
