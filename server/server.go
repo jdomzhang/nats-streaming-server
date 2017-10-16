@@ -419,6 +419,7 @@ type queueState struct {
 	stalledSubCount int       // number of stalled members
 	newOnHold       bool
 	lastSubCount	int       // remind the last count, to see if there is new added sub
+	isSticky        bool      // this queue is sticky, means the sub will be sticky
 }
 
 // When doing message redelivery due to ack expiration, the function
@@ -542,6 +543,7 @@ func (ss *subStore) updateState(sub *subState) {
 		if sub.stalled {
 			qs.stalledSubCount++
 		}
+		qs.CheckAndSetSticky()
 		qs.Unlock()
 		sub.qstate = qs
 	} else {
@@ -555,6 +557,19 @@ func (ss *subStore) updateState(sub *subState) {
 		if sub.isDurableSubscriber() {
 			ss.durables[sub.durableKey()] = sub
 		}
+	}
+}
+
+
+func (sub *subState) CheckAndSetSticky() {
+	if sub != nil && sub.qstate != nil {
+		sub.qstate.isSticky = strings.Contains(sub.QGroup, "@@")
+	}
+}
+
+func (qs *queueState) CheckAndSetSticky() {
+	if qs != nil && qs.subs != nil && len(qs.subs) > 0 {
+		qs.subs[0].CheckAndSetSticky()
 	}
 }
 
@@ -830,7 +845,6 @@ type Options struct {
 	AckSubsPoolSize    int           // Number of internal subscriptions handling incoming ACKs (0 means one per client's subscription).
 	FTGroupName        string        // Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
 	Partitioning       bool          // Specify if server only accepts messages/subscriptions on channels defined in StoreLimits.
-	StickyQGroup       bool          // Sticky sub of queue group, reassign the sub only when the total count of group members changed
 }
 
 // Clone returns a deep copy of the Options object.
@@ -1344,11 +1358,6 @@ func (s *StanServer) start(runningState State) error {
 	storeLimitsLines := (&s.opts.StoreLimits).Print()
 	for _, l := range storeLimitsLines {
 		s.log.Noticef(l)
-	}
-
-	// Show the sticky queue group setting
-	if s.opts.StickyQGroup {
-		s.log.Noticef("Sticky Queue Group is on")
 	}
 
 	// Execute (in a go routine) redelivery of unacknowledged messages,
@@ -2259,60 +2268,15 @@ func findBestQueueSub(sl []*subState, s *StanServer) *subState {
 		}
 	}
 	
-
-	if rsub != nil && s.opts.StickyQGroup && currentSubCount > 0 {
-		// check if repicking the sub if required
-		// only when it's sticky
-		// and the sub list count changed
-		shouldRepick := (rsub.qstate.lastSubCount != currentSubCount)
-
-		// set total count
-		qs := rsub.qstate
-		qs.lastSubCount = currentSubCount
-
-		if shouldRepick {
-			myRand := rand.New(rand.NewSource(time.Now().UnixNano()))
-			randomIndex := myRand.Intn(currentSubCount)
-			targetIndex := -1
-
-			// pick
-			for index, sub := range sl {
-				sub.RLock()
-				// sOut := len(sub.acksPending)
-				sStalled := sub.stalled
-				sHasFailedHB := sub.hasFailedHB
-				sub.RUnlock()
-
-				if !sStalled && !sHasFailedHB {
-					if randomIndex == 0 {
-						targetIndex = index
-						break
-					}
-				
-					randomIndex --
-				}
-			}
-
-			if targetIndex >= 0 {
-				rsub = sl[targetIndex]
-			}
-
-			// got the random sub, move it to first element
-			if rsub != nil {
-				sl[targetIndex] = sl[0]
-				sl[0] = rsub
-				s.log.Noticef("[%v]: lastSubCount: %v, currentSubCount: %v", rsub.subject, rsub.qstate.lastSubCount, currentSubCount)
-				s.log.Noticef("[%v]: repicked client: %v\n", rsub.subject, rsub.ClientID)
-			}
-		}
+	if rsub.isStickyQueue() {
+		rsub = rsub.repickSub(sl, currentSubCount, s)
 	}
-
 
 	len := len(sl)
 	if rsub == nil && len > 0 {
 		rsub = sl[0]
 	}
-	if !s.opts.StickyQGroup {
+	if !rsub.isStickyQueue() {
 		if len > 1 && rsub == sl[0] {
 			copy(sl, sl[1:len])
 			sl[len-1] = rsub
@@ -2321,6 +2285,57 @@ func findBestQueueSub(sl []*subState, s *StanServer) *subState {
 
 
 	return rsub
+}
+
+func (sub *subState) repickSub(sl []*subState, currentSubCount int, s *StanServer) (*subState) {
+	// check if repicking the sub if required
+	// only when it's sticky
+	// and the sub list count changed
+	shouldRepick := (sub.qstate.lastSubCount != currentSubCount)
+
+	// set total count
+	qs := sub.qstate
+	qs.lastSubCount = currentSubCount
+
+	if shouldRepick {
+		myRand := rand.New(rand.NewSource(time.Now().UnixNano()))
+		randomIndex := myRand.Intn(currentSubCount)
+		targetIndex := -1
+
+		// pick
+		for index, sub := range sl {
+			sub.RLock()
+			// sOut := len(sub.acksPending)
+			sStalled := sub.stalled
+			sHasFailedHB := sub.hasFailedHB
+			sub.RUnlock()
+
+			if !sStalled && !sHasFailedHB {
+				if randomIndex == 0 {
+					targetIndex = index
+					break
+				}
+			
+				randomIndex --
+			}
+		}
+
+		if targetIndex >= 0 {
+			sub = sl[targetIndex]
+		}
+
+		// got the random sub, move it to first element
+		if sub != nil {
+			sl[targetIndex] = sl[0]
+			sl[0] = sub
+			s.log.Tracef("[%v]: lastSubCount: %v, currentSubCount: %v, repicked client: %v\n", sub.subject, sub.qstate.lastSubCount, currentSubCount, sub.ClientID)
+		}
+	}
+	return sub
+}
+
+func (sub *subState) isStickyQueue() bool{
+	return sub != nil && sub.qstate != nil && sub.qstate.isSticky
 }
 
 // Send a message to the queue group
@@ -3240,6 +3255,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 				qs.shadow = nil
 				qs.subs = append(qs.subs, sub)
 			}
+			qs.CheckAndSetSticky()
 			qs.Unlock()
 			setStartPos = false
 		}
