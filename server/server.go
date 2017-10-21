@@ -419,7 +419,6 @@ type queueState struct {
 	stalledSubCount int       // number of stalled members
 	newOnHold       bool
 	lastSubCount	int       // remind the last count, to see if there is new added sub
-	isSticky        bool      // this queue is sticky, means the sub will be sticky
 }
 
 // When doing message redelivery due to ack expiration, the function
@@ -543,7 +542,6 @@ func (ss *subStore) updateState(sub *subState) {
 		if sub.stalled {
 			qs.stalledSubCount++
 		}
-		qs.CheckAndSetSticky()
 		qs.Unlock()
 		sub.qstate = qs
 	} else {
@@ -557,19 +555,6 @@ func (ss *subStore) updateState(sub *subState) {
 		if sub.isDurableSubscriber() {
 			ss.durables[sub.durableKey()] = sub
 		}
-	}
-}
-
-
-func (sub *subState) CheckAndSetSticky() {
-	if sub != nil && sub.qstate != nil {
-		sub.qstate.isSticky = strings.Contains(sub.QGroup, "@@")
-	}
-}
-
-func (qs *queueState) CheckAndSetSticky() {
-	if qs != nil && qs.subs != nil && len(qs.subs) > 0 {
-		qs.subs[0].CheckAndSetSticky()
 	}
 }
 
@@ -781,17 +766,69 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 	}
 	ss.Unlock()
 
-	// Calling this will sort current pending messages and ensure
-	// that the ackTimer is properly set. It does not necessarily
-	// mean that messages are going to be redelivered on the spot.
-	for _, qsub := range qsubs {
-		ss.stan.performAckExpirationRedelivery(qsub, false)
+	// redeliver with special logic
+	if qs.isStickyQueue() {
+		qs.RedeliverPendingMsgForStickyQueue(c, sub, qsubs)
+	} else {
+		// Calling this will sort current pending messages and ensure
+		// that the ackTimer is properly set. It does not necessarily
+		// mean that messages are going to be redelivered on the spot.
+		for _, qsub := range qsubs {
+			ss.stan.performAckExpirationRedelivery(qsub, false)
+		}
 	}
 
 	if log != nil {
 		traceCtx := subStateTraceCtx{clientID: clientID, isRemove: true, isUnsubscribe: unsubscribe, isGroupEmpty: queueGroupIsEmpty}
 		traceSubState(log, sub, &traceCtx)
 	}
+}
+
+func (qs *queueState) RedeliverPendingMsgForStickyQueue(c *channel, removingSub *subState, qsubs map[uint64]*subState) {
+	// we know the sub is removed
+	// so we will redeliver the ack pending msgs
+	// clear the timer first
+	bestSub := findBestQueueSub(qs.subs)
+	if bestSub == nil || bestSub.IsClosed || bestSub == removingSub {
+		return
+	}
+
+	bestSubAcks := len(bestSub.acksPending)
+	// get all ackpending ones
+	// move them to the best sub
+	// so that they have the right delivery order
+	// then trigger redelivery
+	for _, qsub := range qsubs {
+		// clear the ack timer
+		// then append the ack pending ones to best sub
+		// bypass the bestSub itself
+		if qsub != bestSub && len(qsub.acksPending) > 0 {
+			qsub.clearAckTimer()
+			for key, value := range qsub.acksPending {
+				bestSub.acksPending[key] = value
+			}
+			// clear the map
+			qsub.acksPending = make(map[uint64]int64)
+		}
+	}
+
+	// if nothing added to bestSub, skip
+	if len(removingSub.acksPending) == bestSubAcks {
+		return
+	}
+
+	c.ss.stan.performDurableRedelivery(c, bestSub)
+	
+	// all outstanding msg are sent, reset newOnHold to receive new msg
+	qs.newOnHold = false
+
+	// if it is the last sending sub, and there are other sub
+	// then it should trigger and let message continue processing
+	// otherwise, it will stop there until a new msg or a new sub is comming
+	if qs.lastSent == removingSub.LastSent {
+		c.ss.stan.processMsg(c)
+	}
+	// fmt.Printf("removed. [%v]\n", clientID)
 }
 
 // Lookup by durable name.
@@ -2245,11 +2282,10 @@ func (s *StanServer) sendPublishErr(subj, guid string, err error) {
 
 // FIXME(dlc) - place holder to pick sub that has least outstanding, should just sort,
 // or use insertion sort, etc.
-func findBestQueueSub(sl []*subState, s *StanServer) *subState {
+func findBestQueueSub(sl []*subState) *subState {
 	var (
 		leastOutstanding = int(^uint(0) >> 1)
 		rsub             *subState
-		currentSubCount = 0
 	)
 	for _, sub := range sl {
 		sub.RLock()
@@ -2264,84 +2300,133 @@ func findBestQueueSub(sl []*subState, s *StanServer) *subState {
 				leastOutstanding = sOut
 				rsub = sub
 			}
-			currentSubCount ++
 		}
-	}
-	
-	if rsub.isStickyQueue() {
-		rsub = rsub.repickSub(sl, currentSubCount, s)
 	}
 
 	len := len(sl)
 	if rsub == nil && len > 0 {
 		rsub = sl[0]
 	}
-	if !rsub.isStickyQueue() {
-		if len > 1 && rsub == sl[0] {
-			copy(sl, sl[1:len])
-			sl[len-1] = rsub
-		}
+
+	// fmt.Printf("finding the best, isStickyQueue: [%v]\n", rsub.isStickyQueue() )
+	// fmt.Println(rsub != nil, rsub != nil && rsub.QGroup != "", rsub != nil && rsub.QGroup != "" && strings.Contains(rsub.QGroup, "@@"))
+		
+	if rsub.isStickyQueue() && len > 0 {
+		rsub = rsub.repickSubForStickyQGroup(sl)
+	}
+
+	if len > 1 && rsub == sl[0] {
+		copy(sl, sl[1:len])
+		sl[len-1] = rsub
 	}
 
 
 	return rsub
 }
 
-func (sub *subState) repickSub(sl []*subState, currentSubCount int, s *StanServer) (*subState) {
+func (qs *queueState) isStickyQueue() bool {
+	return qs != nil && len(qs.subs) > 0 && qs.subs[0].isStickyQueue()
+}
+
+func (sub *subState) isStickyQueue() bool {
+	return sub != nil && sub.QGroup != "" && sub.IsDurable && strings.Contains(sub.QGroup, "@@")
+}
+
+func (sub *subState) repickSubForStickyQGroup(sl []*subState) (*subState) {
 	// check if repicking the sub if required
 	// only when it's sticky
 	// and the sub list count changed
-	shouldRepick := (sub.qstate.lastSubCount != currentSubCount)
+	currentSubCount := 0
+	for _, sub := range sl {
+		sub.RLock()
+		sHasFailedHB := sub.hasFailedHB
+		sIsClosed := sub.IsClosed
+		// clientID := sub.ClientID
+		sub.RUnlock()
 
-	// set total count
+		// important: only count when the client has not failed heart beat, even it's stalled
+		// important: because we want to keep the sub sticky
+		// check if client is there
+		// client := s.clients.lookup(clientID)
+		if !sHasFailedHB && !sIsClosed /*&& client != nil*/ {
+			currentSubCount ++
+		}
+	}
+
+	// fmt.Println("repicking...")
+	
+	var tempSub *subState
 	qs := sub.qstate
-	qs.lastSubCount = currentSubCount
+	len := len(sl)
+	// the last one is the default one
+	defaultSub := sl[len-1]
+	
+	shouldRepick := (qs.lastSubCount == 0) || (qs.lastSubCount != currentSubCount) ||
+					(defaultSub.hasFailedHB || defaultSub.IsClosed)
+	
+	if shouldRepick && currentSubCount > 0 {
+		// set total count
+		qs.lastSubCount = currentSubCount
 
-	if shouldRepick {
 		myRand := rand.New(rand.NewSource(time.Now().UnixNano()))
 		randomIndex := myRand.Intn(currentSubCount)
-		targetIndex := -1
 
 		// pick
-		for index, sub := range sl {
-			sub.RLock()
-			// sOut := len(sub.acksPending)
+		for _, _sub := range sl {
+			_sub.RLock()
 			sStalled := sub.stalled
-			sHasFailedHB := sub.hasFailedHB
-			sub.RUnlock()
+			sHasFailedHB := _sub.hasFailedHB
+			sIsClosed := sub.IsClosed
+			// clientID := sub.ClientID
+			_sub.RUnlock()
 
-			if !sStalled && !sHasFailedHB {
-				if randomIndex == 0 {
-					targetIndex = index
+			// check if client is there
+			// client := s.clients.lookup(clientID)
+			if !sStalled && !sHasFailedHB && !sIsClosed /*&& client!= nil*/ {
+				tempSub = _sub
+				if randomIndex --; randomIndex < 0 {
 					break
 				}
-			
-				randomIndex --
 			}
 		}
 
-		if targetIndex >= 0 {
-			sub = sl[targetIndex]
+		// got the random sub
+		if tempSub != nil {
+			fmt.Printf("[%v] [%v]: lastSubCount: %v, currentSubCount: %v, repicked client: %v\n",
+				time.Now(), tempSub.subject, tempSub.qstate.lastSubCount, currentSubCount, tempSub.ClientID)
 		}
+	} else {
+		// don't repick, use the last one
+		tempSub = defaultSub
 
-		// got the random sub, move it to first element
-		if sub != nil {
-			sl[targetIndex] = sl[0]
-			sl[0] = sub
-			s.log.Tracef("[%v]: lastSubCount: %v, currentSubCount: %v, repicked client: %v\n", sub.subject, sub.qstate.lastSubCount, currentSubCount, sub.ClientID)
+		fmt.Printf("[%v] [%v]: no repick, lastSubCount: %v, currentSubCount: %v, use default client: %v\n",
+			time.Now(), tempSub.subject, tempSub.qstate.lastSubCount, currentSubCount, tempSub.ClientID)
+	}
+
+	// always move to last position
+	if sl[len-1] != tempSub {
+		for index, _sub := range sl {
+			if _sub == tempSub {
+				sl[index] = sl[len-1]
+				sl[len-1] = tempSub
+				break
+			}
 		}
 	}
-	return sub
+
+	if tempSub != nil && tempSub.stalled {
+		fmt.Printf("[%v] [%v]: [%v] stalled. removed:[%v] failedHB:[%v]\n", time.Now(), tempSub.subject, tempSub.ClientID, 
+				tempSub.removed, tempSub.hasFailedHB)
+	}
+
+	return tempSub
 }
 
-func (sub *subState) isStickyQueue() bool{
-	return sub != nil && sub.qstate != nil && sub.qstate.isSticky
-}
 
 // Send a message to the queue group
 // Assumes qs lock held for write
 func (s *StanServer) sendMsgToQueueGroup(qs *queueState, m *pb.MsgProto, force bool) (*subState, bool, bool) {
-	sub := findBestQueueSub(qs.subs, s)
+	sub := findBestQueueSub(qs.subs)
 	if sub == nil {
 		return nil, false, false
 	}
@@ -2353,9 +2438,15 @@ func (s *StanServer) sendMsgToQueueGroup(qs *queueState, m *pb.MsgProto, force b
 	if !force && !wasStalled && sub.stalled {
 		qs.stalledSubCount++
 	}
+	if m.Redelivered {
+		fmt.Println("redelivered. ", m.Sequence)
+	}
 	if didSend && sub.LastSent > qs.lastSent {
 		qs.lastSent = sub.LastSent
 	}
+	// if !didSend && !sendMore  {
+	// 	sendMore = qs.stalledSubCount < len(sub.qstate.subs)
+	// }
 	sub.Unlock()
 	return sub, didSend, sendMore
 }
@@ -2711,7 +2802,17 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 // sub's lock held on entry.
 func (s *StanServer) setupAckTimer(sub *subState, d time.Duration) {
 	sub.ackTimer = time.AfterFunc(d, func() {
-		s.performAckExpirationRedelivery(sub, false)
+		if sub.isStickyQueue() {
+			c := s.channels.get(sub.subject)
+			qsubs := make(map[uint64]*subState)
+			for _, qsub := range sub.qstate.subs {
+				qsubs[qsub.ID] = qsub
+			}
+			sub.qstate.RedeliverPendingMsgForStickyQueue(c, sub, qsubs)
+		} else {
+			s.performAckExpirationRedelivery(sub, false)			
+		}
+
 	})
 }
 
@@ -3118,10 +3219,7 @@ func (s *StanServer) addSubscription(ss *subStore, sub *subState) error {
 		return fmt.Errorf("can't find clientID: %v", sub.ClientID)
 	}
 	// Store this subscription in subStore
-	if err := ss.Store(sub); err != nil {
-		return err
-	}
-	return nil
+	return ss.Store(sub)
 }
 
 // updateDurable adds back `sub` to the client and updates the store.
@@ -3255,7 +3353,6 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 				qs.shadow = nil
 				qs.subs = append(qs.subs, sub)
 			}
-			qs.CheckAndSetSticky()
 			qs.Unlock()
 			setStartPos = false
 		}
@@ -3493,6 +3590,7 @@ func (s *StanServer) processSubscriptionsStart() {
 			sub := subStart.sub
 			qs := subStart.qs
 			isDurable := subStart.isDurable
+			fmt.Printf("c==s.channels.get(sub.subject): [%v]\n", c==s.channels.get(sub.subject))
 			if isDurable {
 				// Redeliver any outstanding.
 				s.performDurableRedelivery(c, sub)
